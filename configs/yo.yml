@@ -1,0 +1,27 @@
+model:
+  save_path: 'checkpoints'
+  checkpoint: 'deepLab.pkl'
+data:
+    img_size: [600,400]
+    root: 'data'
+    num_classes: 5
+    use_temporal: 0
+    split:
+      val: 0
+      test: 0
+training:
+    random_seed: 42
+    batch_size: 1 #8
+    print_interval: 10
+    val_interval: 50
+    total_epochs: 1000
+    optimizer:
+      name: 'sgd'
+      lr: 0.005
+      weight_decay: 0.0001
+      momentum: 0.9
+      nesterov: 1
+    scheduler:
+      name: 'StepLR'
+      gamma: 0.25
+gpu_id: 0
