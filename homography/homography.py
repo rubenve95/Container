@@ -75,12 +75,117 @@ class Homography():
 		#print(camera_pts)
 		return np.asarray(camera_pts).reshape(-1,2).astype(np.float32), np.asarray(object_pts).reshape(-1,2).astype(np.float32)
 
-	def show_homography(self, M, img_name, vid_name, side, write = False):
+	def get_warped_borders(self, side):
+		#width = 600 + 2*60
+		#height = 400 + 2*60
+		left = 0
+		top = 0
+		if side == 'Left' or side == 'Right':
+			right = self.container_shortside#/self.container_longside*width
+			bottom = self.container_height#/self.container_longside*height
+		elif side == 'Front' or side == 'Back':
+			right = self.container_longside
+			bottom = self.container_height
+		else:
+			right = self.container_longside
+			bottom = self.container_shortside
+		return int(left),int(right),int(top),int(bottom)
+
+	def apply_homography(self, M, img_name, vid_name, side):
 		orig_img = cv2.imread(os.path.join('data/images/', vid_name, img_name))
 		warp_img = cv2.resize(orig_img, (600,400))
 		padding = 60
 		warp_img = cv2.copyMakeBorder(warp_img, padding, padding, padding, padding, cv2.BORDER_CONSTANT)
 		img = cv2.warpPerspective(warp_img, M, (self.width, self.height))
+
+		left,right,top,bottom = self.get_warped_borders(side)
+		#print(img.shape)
+		img = img[:bottom,:right]
+		if side == 'Right' or side == 'Back' or side == 'Top':
+			#self.show_homography(img, img_name, vid_name, side)
+			img = img[:,::-1]
+			#self.show_homography(img, img_name, vid_name, side)
+		return img
+
+	def fold_out_container(self, imgs):
+		'''
+		In goes: a dictionary with as keys the side labels and as entries warped images
+		'''
+		width = 2*int(self.container_longside) + 2*int(self.container_shortside)
+		height = int(self.container_height) + int(self.container_longside)
+		flat_img = np.zeros((height, width, 3), dtype=np.uint8)
+
+		side = 'Back'
+		current_width = 0
+		current_height = int(self.container_longside)
+		incremented_height = current_height + int(self.container_height)
+		incremented_width = int(self.container_longside)
+		if side in imgs.keys():
+			flat_img[current_height:incremented_height,:incremented_width] = imgs['Back']
+
+		side = 'Left'
+		current_width = incremented_width
+		incremented_width = current_width + int(self.container_shortside)
+		if side in imgs.keys():
+			flat_img[current_height:incremented_height,current_width:incremented_width] = imgs[side]
+
+		side = 'Top'
+		if side in imgs.keys():
+			flat_img[:current_height,current_width:incremented_width] = imgs[side].transpose(1,0,2)
+
+		side = 'Front'
+		current_width = incremented_width
+		incremented_width = current_width + int(self.container_longside)
+		if side in imgs.keys():
+			flat_img[current_height:incremented_height,current_width:incremented_width] = imgs[side]
+
+		side = 'Right'
+		current_width = incremented_width
+		incremented_width = current_width + int(self.container_shortside)
+		if side in imgs.keys():
+			flat_img[current_height:incremented_height,current_width:incremented_width] = imgs[side]
+
+		return flat_img
+
+	def show_warped_video(self, vid_name, write=True):
+		def sort_files(elem):
+			name = elem.split('.')[0]
+			return int(name)
+
+		images_folder = os.path.join('data/images', vid_name)
+		homographies_folder = os.path.join('data/results/homographies', vid_name)
+		files = os.listdir(images_folder)
+		files = sorted(files, key=sort_files)
+
+		width = 600
+		height = 800
+		out = cv2.VideoWriter('data/results/video/' + vid_name, cv2.VideoWriter_fourcc(*'mp4v'), 5.0, (width,height))
+
+		for f in files:
+			folded_img_path = os.path.join(homographies_folder, f + '_folded_out' + '.png')
+			img_path = os.path.join(homographies_folder, f + '_tags' + '.png')
+			padding = 5
+			img = cv2.imread(img_path)
+			img = cv2.resize(img, (600-2*padding,400-2*padding))
+			img = cv2.copyMakeBorder(img, padding, padding, padding, padding, cv2.BORDER_CONSTANT,value=[255,255,255])
+			folded_img = cv2.imread(folded_img_path)
+			folded_img = cv2.resize(folded_img, (600-2*padding,400-2*padding))
+			folded_img = cv2.copyMakeBorder(folded_img, padding, padding, padding, padding, cv2.BORDER_CONSTANT,value=[255,255,255])
+			total_img = np.vstack((folded_img,img))
+			out.write(total_img)
+		out.release()
+
+	def show_homography(self, img, img_name, vid_name, side, write = False):
+		# orig_img = cv2.imread(os.path.join('data/images/', vid_name, img_name))
+		# warp_img = cv2.resize(orig_img, (600,400))
+		# padding = 60
+		# warp_img = cv2.copyMakeBorder(warp_img, padding, padding, padding, padding, cv2.BORDER_CONSTANT)
+		# img = cv2.warpPerspective(warp_img, M, (self.width, self.height))
+
+		# left,right,top,bottom = self.get_warped_borders(side)
+		# #print(img.shape)
+		# img = img[:bottom,:right]
+
 		#M_inv = np.linalg.inv(M)
 		#img = cv2.warpPerspective(img, M_inv, (self.width, self.height))
 		#img = np.hstack((orig_img, img))

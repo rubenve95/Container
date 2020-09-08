@@ -15,9 +15,14 @@ from project_code.saver.saver import ArraySaver
 #top yellow and side red
 
 class EM():
-	def __init__(self, data_root, folder_name):
+	def __init__(self, data_root, folder_name, height=400, width = 600, padding=100, num_classes=5):
 		self.folder_name = folder_name
 		self.data_root = data_root
+
+		self.width = width
+		self.height = height
+		self.padding = padding
+		self.num_classes = num_classes
 
 	def softmax(self, x, axis=None):
 		x = x - x.max(axis=axis, keepdims=True)
@@ -25,10 +30,311 @@ class EM():
 		return y / y.sum(axis=axis, keepdims=True)
 
 	def get_numpy_array(self, name):
-		path = os.path.join(self.data_root, 'results/segmenation_probs', self.folder_name, name)
+		path = os.path.join(self.data_root, 'results/segmentation_probs', self.folder_name, name)
 		with open(path, 'rb') as f:
 			array = np.load(f)[0]
 		return array
+
+	def define_box(self, polygons):
+		'''
+		Assuming polygons length >= 2
+		direction computed from last 2 points
+		'''
+		points = []
+		sides = []
+		parallel_lines = []
+
+		for poly in polygons:
+			sides.append([])
+			for point in poly:
+
+				point_index = len(points)
+				for j,p in enumerate(points):
+					if np.array_equal(point, p):
+						point_index = j
+						break
+
+				sides[-1].append(point_index)
+				if point_index == len(points):
+					points.append(point)
+
+		for side in sides:
+			new_groups = [ [[side[0],side[1]], [side[2],side[3]]], [[side[1],side[2]], [side[3],side[0]]] ] 
+			for new_group in new_groups:
+				isnew = True
+
+				for group in parallel_lines:
+					if new_group[0] in group or new_group[0][::-1] in group:
+						group.append(new_group[1])
+						isnew = False
+						break
+					elif new_group[1] in group or new_group[1][::-1] in group:
+						group.append(new_group[0])
+						isnew = False
+						break
+				if isnew:
+					parallel_lines.append(new_group)
+
+		points = np.asarray(points)
+		return points, sides, parallel_lines
+
+	def parametrize_vanishing_points(self, points, sides, parallel_lines):
+		parameter_points = sides[0].copy()
+		#direction_line = None
+		parameter_lines = [[],[],[]]
+		for i,group in enumerate(parallel_lines):
+			for line in group:
+				first_point_in = (line[0] in parameter_points)
+				second_point_in = (line[1] in parameter_points)
+
+				if first_point_in and second_point_in:
+					parameter_lines[i].append(line)
+
+				elif (first_point_in and not second_point_in) or (not first_point_in and second_point_in):
+					if len(parameter_lines[i]) == 0:
+						parameter_lines[i].append(line)
+						new_point = line[1] if first_point_in else line[0]
+						parameter_points.append(new_point)
+					else:
+						parameter_lines[i].append(line)
+						break
+		return parameter_points, parameter_lines
+
+	def apply_vanishing_points(self, points, parallel_lines, parameter_points, parameter_lines):
+		known_parameters = parameter_points.copy()
+		new_points = points.copy()
+
+		vanishing_points = []
+		for lines in parameter_lines:
+			intersection = self.line_intersection(points[ lines[0][0] ], points[ lines[0][1] ], points[ lines[1][0] ], points[ lines[1][1] ])
+			vanishing_points.append(intersection)
+
+		while len(known_parameters) < len(points):
+			lines_almost_known = [[],[],[]]
+			findable_point = []
+			for i,lines in enumerate(parallel_lines):
+				for line in lines:
+					first_point_in = (line[0] in known_parameters)
+					second_point_in = (line[1] in known_parameters)
+					if (first_point_in and not second_point_in) or (not first_point_in and second_point_in):
+						lines_almost_known[i].append(line)
+						new_point = line[1] if first_point_in else line[0]
+						findable_point.append(new_point)
+			findable_point = list(set([x for x in findable_point if findable_point.count(x) > 1]))[0]
+			intersection_lines = []
+			for i,lines in enumerate(lines_almost_known):
+				for line in lines:
+					for j,coor in enumerate(line):
+						if findable_point == coor:
+							known_point = new_points[ line[j-1] ]
+							intersection_lines.append([known_point, vanishing_points[i]])
+			intersection = self.line_intersection(intersection_lines[0][0], intersection_lines[0][1], intersection_lines[1][0], intersection_lines[1][1])
+			new_points[findable_point] = intersection
+			known_parameters.append(findable_point)
+
+		return new_points
+
+	def get_direction_angle(self, points, parameter_lines):
+		line = parameter_lines[-1][-1]
+		vector = points[line[0]] - points[line[1]]
+		angle = np.arctan(vector)
+		return angle
+
+	def apply_direction_angle(self, points, parameter_lines, angle):
+		angle = np.radians(angle)
+		line = parameter_lines[-1][-1]
+		vector = points[line[1]] - points[line[0]]
+		r = np.array(( (np.cos(angle), -np.sin(angle)),
+			(np.sin(angle),  np.cos(angle)) ))
+		points[line[1]] = points[line[0]] + r.dot(vector)
+		return points
+
+	def EM_box(self, points, sides, parallel_lines, parameter_points, parameter_lines, faces, show=False, total_iters=6, convergence_ratio=1e-3):
+		#Denk later nog aan richting, zit op het moment niet in parameter_points
+
+		points = self.apply_vanishing_points(points, parallel_lines, parameter_points, parameter_lines)
+		best_points = points.copy()
+		parameter_order = np.asarray(parameter_points.copy())
+		xy_order = np.arange(2)
+		order = np.array(np.meshgrid(parameter_order, xy_order)).T.reshape(-1,2)
+		order = np.vstack((order, np.array([-1, -1])))
+
+		image_offset = int(0.05*self.width)
+		best_p_list = []
+		best_p_av = 1e9
+		step_size = max(int((self.width + self.height + 4*self.padding)/20), 1)
+		t_prev = time.time()
+		for it in range(total_iters):
+			t_now = time.time()
+			t_prev = t_now
+			np.random.shuffle(order)
+			prev_best_p_av = best_p_av
+			best_p_list = []
+			step_size = max(int(step_size/4), 1)
+			time0 = time.time()
+
+			for o in order:
+				points = best_points.copy()
+				best_p = 1e9
+				param = o[0]
+				xy = o[1]
+
+				if o[0] < 0:
+					mini = -5
+					maxi = 4.1
+					used_step_size = 0.1/(it+1)
+				else:
+					mini = int(max(0, points[param][xy] - image_offset))
+					maximum_img = self.width+2*self.padding-1 if xy == 0 else self.height+2*self.padding-1
+					maxi = int(min(maximum_img, points[param][xy] + image_offset))
+					used_step_size = step_size
+				#before = points[param][xy]
+				for value_var in np.arange(mini,maxi+1,used_step_size):
+					new_points = points.copy()
+					p_list = []
+					p=0
+					if o[0] < 0:
+						new_points = self.apply_direction_angle(new_points, parameter_lines, value_var)
+						#self.show_lines(new_points, sides, parallel_lines, special_point = param, show_indices=False, name='angle')
+					else:
+						new_points[param][xy] = value_var
+					new_points = self.apply_vanishing_points(new_points, parallel_lines, parameter_points, parameter_lines)
+					for side,face in zip(sides,faces):
+						polygon = np.asarray([new_points[s] for s in side])
+						p_list.append(self.probability(face, polygon))#, show= (show and (value_var%20 == 0))))
+
+					p = sum(p_list)
+					#if value_var == before:
+						# print('before', p)
+						# print(new_points)
+						# print(points)
+
+						# p += self.probability(face, polygon, show= (show and (value_var%20 == 0)))
+					# if show and (value_var % 20 == 0 or o[0] < 0):
+					# 	self.show_lines(new_points, sides, parallel_lines, special_point = param, show_indices=False, name='during')
+					if p <= best_p:
+						best_p = p
+						best_points = new_points.copy()
+				best_p_list.append(best_p)
+
+			best_p_av = sum(best_p_list)/len(best_p_list)
+			#print("Iteration {} Best likelihood {:.2f} Time {:.2f}".format(it, best_p_av, time.time() - time0))
+			if -best_p_av + prev_best_p_av < best_p_av*convergence_ratio and step_size == 1:
+				#print(it)
+				#self.show_lines(new_points, sides, parallel_lines, special_point = param, show_indices=False, name='during')
+				return best_points
+		return best_points
+
+	def opt_vp(self, polygons, face_labels, array, show=False, filepath=None):
+
+		if len(polygons) == 1:
+			return polygons
+
+		# self.height,self.width = 400,600
+		# self.padding = 60
+		array = self.softmax(array, axis=0)
+		faces = []
+		for f in face_labels:
+			new_face = self.add_padding_face(array[f])
+			faces.append(new_face)
+
+		points, sides, parallel_lines = self.define_box(polygons)
+		orig_points = points.copy()
+		parameter_points, parameter_lines = self.parametrize_vanishing_points(points, sides, parallel_lines)
+
+		best_points = self.EM_box(points, sides, parallel_lines, parameter_points, parameter_lines, faces, show=show)
+
+		if show:
+			#while True:
+			self.show_lines(orig_points, sides, parallel_lines, show_indices=False, name='before', filepath=filepath)
+			self.show_lines(best_points, sides, parallel_lines, show_indices=False, name='after', filepath=filepath)
+
+		best_polygons = self.points_to_polygons(best_points, sides)
+
+		return best_polygons
+
+		# new_points = self.apply_vanishing_points(points, parallel_lines, parameter_points, parameter_lines)
+
+		#self.show_lines(points, sides, parallel_lines)
+
+	def points_to_polygons(self, points, sides):
+		polygons = []
+		for side in sides:
+			polygon = np.asarray([points[s] for s in side])
+			polygons.append(polygon)
+		return polygons
+
+	def show_lines(self, points, sides, parallel_lines, special_point = None, show_indices = False, name='img', filepath=None):
+		img = self.img.copy()
+		img_map = self.img_map.copy()
+		img = cv2.resize(img, (self.width, self.height))
+		img = cv2.copyMakeBorder(img, self.padding, self.padding, self.padding, self.padding, cv2.BORDER_CONSTANT)
+		img_map = cv2.resize(img_map, (self.width, self.height))
+		img_map = cv2.copyMakeBorder(img_map, self.padding, self.padding, self.padding, self.padding, cv2.BORDER_CONSTANT)
+
+		colors = [(255,0,0),(0,255,0),(0,0,255)]
+
+		# for i,p in enumerate(points):
+		# 	text = str(i) if show_indices else str(p[0]) + ' ' + str(p[1])
+		# 	color = (255,255,255) if special_point == i else (0,255,0)
+		# 	cv2.putText(img,text, (p[0], p[1]), cv2.FONT_HERSHEY_SIMPLEX,1,color,1)
+		# 	cv2.putText(img_map,text, (p[0], p[1]), cv2.FONT_HERSHEY_SIMPLEX,1,color,1)
+
+		for ilines,lines in enumerate(parallel_lines):
+			if len(lines) == 1:
+				continue
+			for i,line in enumerate(lines):
+
+				line0 = [ points[ line[0] ], points[ line[1] ] ]
+				line1 = [ points[ lines[i-1][0] ], points[ lines[i-1][1] ] ]
+
+				intersection = self.line_intersection(line0[0],line0[1], line1[0],line1[1])
+
+				try:
+					intersection = (int(intersection[0]), int(intersection[1]))
+					img = cv2.line(img, (int(line0[0][0]),int(line0[0][1])), intersection, colors[ilines], 1) 
+					img = cv2.line(img, (int(line0[1][0]),int(line0[1][1])), (int(line0[0][0]),int(line0[0][1])), colors[ilines], 3) 
+
+					img = cv2.line(img, (int(line1[0][0]),int(line1[0][1])), intersection, colors[ilines], 1) 
+					img = cv2.line(img, (int(line1[1][0]),int(line1[1][1])), (int(line1[0][0]),int(line1[0][1])), colors[ilines], 3)
+
+					img_map = cv2.line(img_map, (int(line0[0][0]),int(line0[0][1])), intersection, colors[ilines], 1) 
+					img_map = cv2.line(img_map, (int(line0[1][0]),int(line0[1][1])), (int(line0[0][0]),int(line0[0][1])), colors[ilines], 3) 
+
+					img_map = cv2.line(img_map, (int(line1[0][0]),int(line1[0][1])), intersection, colors[ilines], 1) 
+					img_map = cv2.line(img_map, (int(line1[1][0]),int(line1[1][1])), (int(line1[0][0]),int(line1[0][1])), colors[ilines], 3)  
+				except:
+					return
+					#print(intersection)
+
+		img = np.hstack((img, img_map))
+		if filepath is None:
+			cv2.imshow(name, img)
+			key = cv2.waitKey(0)
+			if key == ord('q') & 0xFF:
+				cv2.destroyAllWindows()
+				exit()
+		else:
+			path_name = filepath.split('/')
+			path_name[-1] = path_name[-1].split('.')[0] + '_' + name + '.png'
+			filepath = '/'.join(path_name)
+			cv2.imwrite(os.path.join('data/results/yoyoyo', filepath), img)
+
+	def line_intersection(self, a1,a2, b1,b2):
+
+		def perp( a ) :
+			b = np.empty_like(a)
+			b[0] = -a[1]
+			b[1] = a[0]
+			return b
+
+		da = a2-a1
+		db = b2-b1
+		dp = a1-b1
+		dap = perp(da)
+		denom = np.dot( dap, db)
+		num = np.dot( dap, dp )
+		return (num / denom.astype(float))*db + b1
 
 	def show_image(self, mask, polygon, name='img'):
 		#img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -41,6 +347,9 @@ class EM():
 		#img = np.pad(img, (self.padding,self.padding,0), 'constant', constant_values=(0,0,0))
 		#img[...,1] = np.pad(img[...,1], (self.padding,self.padding), 'constant', constant_values=(0,0))
 		#img[...,2] = np.pad(img[...,2], (self.padding,self.padding), 'constant', constant_values=(0,0))
+		#img[...,2] = mask*255
+		#img[...,1] = mask*255
+		# img[...,0] = mask*255
 		img[...,2][mask] = 255
 		img = cv2.circle(img, (polygon[0][0], polygon[0][1]), 3, (0,255,0), -1)
 		cv2.putText(img,str(polygon[0][0]) + ' ' + str(polygon[0][1]), (polygon[0][0], polygon[0][1]), cv2.FONT_HERSHEY_SIMPLEX,1,(0,255,0),1)
@@ -151,6 +460,8 @@ class EM():
 			return None
 		iters = 0
 		while True:
+			if iters == 100:
+				return None
 			iters += 1
 			approx = cv2.approxPolyDP(contours[0],epsilon,True)
 			if len(approx) > 4:
@@ -224,10 +535,18 @@ class EM():
 
 	def probability(self, face, polygon, show=False, mask=None):
 		if mask is None:
-			mask = self.polygon_mask(polygon, show=show)
+			mask = self.polygon_mask(polygon, show=False)
 
-		P_in = np.sum(face[mask==1])
-		P_out = np.sum(1 - face[mask==0])
+		if show:
+			self.show_image(mask, polygon)
+			# self.show_image(mask*face, polygon)
+		#P_in = np.sum(face[mask==1])
+		#P_out = np.sum(1 - face[mask==0])
+
+		P_in = -np.sum(np.log(face[mask==1]))
+		P_out = -np.sum(np.log(1 - face[mask==0]))
+
+		#print(P_in, P_out)
 
 		# P_in = -np.sum(np.log(face[mask==1]))
 		# P_out = -np.sum(np.log(1 - face[mask==0]))
@@ -235,7 +554,7 @@ class EM():
 		# area = np.sum(mask)/np.prod(mask.shape)
 		# if area < 0.1:
 		# 	P *= area
-		return P
+		return P#/np.sum(mask[mask==1])
 
 	def point_distance(self, p0, p1):
 		return np.linalg.norm(p0-p1)
@@ -346,7 +665,7 @@ class EM():
 		polygon_order = np.arange(len(polygons))
 		order = np.array(np.meshgrid(polygon_order, point_order, xy_order)).T.reshape(-1,3)
 		shared_points, order = self.handle_shared_points(order, polygons)
-		best_p_av = 0
+		best_p_av = 1e9
 		step_size_factor = 0.1#/(len(polygons))
 		max_steps = int(20/len(polygons))
 		for it in range(total_iters):
@@ -355,7 +674,7 @@ class EM():
 			best_p_list = []
 			np.random.shuffle(order)
 			for o in order:
-				best_p = 0
+				best_p = 1e9
 				poly_nb = o[0]
 				point_nb = o[1]
 				var = o[2]
@@ -379,7 +698,8 @@ class EM():
 						pt_nb = shared_points[poly_nb][point_nb][po_nb]
 						polygons[po_nb][pt_nb][var] = value_var
 						p += self.probability(faces[po_nb], polygons[po_nb], show= (show and (value_var%20 == 0)))
-					if p >= best_p:
+					if p <= best_p:
+					# if p >= best_p:
 						best_p = p
 						best_value_var = value_var
 
@@ -392,8 +712,8 @@ class EM():
 				best_p_list.append(best_p)
 
 			best_p_av = sum(best_p_list)/len(best_p_list)
-			#print("Iteration {} Best likelihood {:.2f}".format(it, best_p_av))
-			if best_p_av - prev_best_p_av < best_p_av*convergence_ratio:
+			# print("Iteration {} Best likelihood {}".format(it, best_p_av))
+			if -best_p_av + prev_best_p_av < best_p_av*convergence_ratio:
 				if len(polygons) == 1 and (self.small_area(polygons[0])):
 					#print("Failure!")
 					if nb_retries == 0:
@@ -470,11 +790,27 @@ class EM():
 			new_polygons.append(np.copy(p))
 		return new_polygons
 
+	def calculate_overlap(self, mask1, mask2):
+		overlap = mask2.copy()
+		overlap = overlap[mask1 == True]
+		return overlap
+
+	def remove_full_overlap(self, polygons):
+		masks = [self.polygon_mask(p) for p in polygons]
+		remove = []
+		for im1,m1 in enumerate(masks):
+			for im2,m2 in enumerate(masks):
+				if im1 == im2:
+					continue
+				overlap = self.calculate_overlap(m1,m2)
+				if np.sum(overlap)/np.prod(overlap.shape) == 1.0:
+					remove.append(im1)
+		return remove
+
 	def mask_overlap(self, masks):
 		for im,m1 in enumerate(masks[:-1]):
 			for m2 in masks[im+1:]:
-				overlap = (m2.copy())
-				overlap[m1 == False] = False
+				overlap = self.calculate_overlap(m1, m2)
 				if np.sum(overlap)/np.prod(overlap.shape) > 0.01:
 					return True
 		return False
@@ -496,6 +832,13 @@ class EM():
 					return True
 		return False
 
+	def remove_polygons(self, polygons, face_labels, remove):
+		remove.sort()
+		for r in remove[::-1]:
+			polygons.pop(r)
+			face_labels.pop(r)
+		return polygons, face_labels
+
 	def merge_corners(self, polygons, faces):
 		#Merges corners of polygons so that polygons connect and form one object
 
@@ -509,7 +852,7 @@ class EM():
 			combs = np.array(np.meshgrid(nbs, nbs)).T.reshape(-1,2)
 
 			p = {}
-			best_probability = 0
+			best_probability = 1e9
 			best_polygons = self.copy_polygons(polygons)
 
 			for i0,c0 in enumerate(combs[:-1]):
@@ -524,6 +867,7 @@ class EM():
 
 					if self.polygon_self_crosses(new_polygons) or self.polygon_convex(new_polygons):
 						continue
+
 					probability = 0
 					masks = []
 					for face,poly in zip(faces,new_polygons):
@@ -531,7 +875,7 @@ class EM():
 						masks.append(mask)
 						probability += self.probability(face, poly, mask=mask)
 
-					if (probability >= best_probability and not self.mask_overlap(masks)):
+					if (probability <= best_probability and not self.mask_overlap(masks)):
 						best_probability = probability
 						best_polygons = self.copy_polygons(new_polygons)
 			return best_polygons
@@ -544,7 +888,7 @@ class EM():
 
 			p = {}
 
-			best_probability = 0
+			best_probability = 1e9
 			best_polygons = self.copy_polygons(polygons)
 
 			for c0 in combs_corner3:
@@ -576,12 +920,15 @@ class EM():
 								mask = self.polygon_mask(poly)
 								masks.append(mask)
 								probability += self.probability(face, poly, mask=mask)
-							if (probability >= best_probability and not self.mask_overlap(masks)):
+							if (probability <= best_probability and not self.mask_overlap(masks)):
 								best_probability = probability
 								best_polygons = self.copy_polygons(new_polygons)
 			return best_polygons
 
 	def add_padding_face(self, face):
+
+		#was 0.49, now 0.499999
+
 		pad_value = 0.49	#0.5 means it doesn't matter being in padding or not. 0.49 to slightly punish it
 		padded_face = np.pad(face, (self.padding,self.padding), 'constant', constant_values=(pad_value,pad_value))
 		return padded_face
@@ -600,7 +947,7 @@ class EM():
 			array = self.softmax(array, axis=0)
 
 		self.num_classes,self.height,self.width = array.shape
-		self.padding = int(0.1*max(self.height,self.width))
+		#self.padding = int(0.1*max(self.height,self.width))
 
 		polygons = []
 		face_labels = []
@@ -612,7 +959,6 @@ class EM():
 				break
 			face = array[face_index]
 			polygon = self.get_initial_polygon(face, show=False)
-			#mask = self.polygon_mask(polygon, show=True)
 			face = self.add_padding_face(face)
 			polygon += self.padding
 			polygon = self.process_face([face], [polygon], show=False)[-1]
@@ -622,18 +968,37 @@ class EM():
 				faces.append(face)
 
 		if len(polygons) > 1:
+
+			t0 = time.time()
+
+			remove = self.remove_full_overlap(polygons)
+			polygons,face_labels = self.remove_polygons(polygons, face_labels, remove)
+
+			# print('before merge')
+			# for p in polygons:
+			# 	mask = self.polygon_mask(p, show=True)
+			polygons = self.merge_corners(polygons, faces)
+
+			# print('after merge')
+			# for p in polygons:
+			# 	mask = self.polygon_mask(p, show=True)
+			t1 = time.time()
+			polygons = self.process_face(faces, polygons, show=False)
+
+			# print('after opt')
 			# for p in polygons:
 			# 	mask = self.polygon_mask(p, show=True)
 
-			t0 = time.time()
-			polygons = self.merge_corners(polygons, faces)
-			t1 = time.time()
+		remove = []
+		for i in range(len(polygons)):
+			if self.small_area(polygons[i]):
+				remove.append(i)
+		polygons,face_labels = self.remove_polygons(polygons, face_labels, remove)
 
 			#print("Merging time", t1 - t0)
 			# for p in polygons:
 				# mask = self.polygon_mask(p, show=True)
 
-			polygons = self.process_face(faces, polygons, show=False)
 
 		return polygons, face_labels
 

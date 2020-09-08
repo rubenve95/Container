@@ -53,7 +53,7 @@ class Trainer():
 
         #print("Total number of parameters:", sum(p.numel() for p in self.model.parameters())/1e6, "M")
 
-        self.validation_folder = 'MVI_3015.MP4'
+        self.validation_folder = 'MVI_4627.MP4'
         self.loader_getter = LoaderGetter(options, specific_folders={'val': self.validation_folder})
         self.img_saver = ImgSaver()
         self.step = int(self.epoch*self.loader_getter.get_size('train')/options['training']['batch_size'])
@@ -62,27 +62,41 @@ class Trainer():
         self.model.eval()
         self.evaluator.reset()
         evaluator2 = Metrics(options['data']['num_classes'])
-        evaluator2.reset()
+        evaluator_vp = Metrics(options['data']['num_classes'])
+        evaluator_vp.reset()
         post = EM(options['data']['root'], self.validation_folder)
+        array_saver = ArraySaver()
         val_loader = self.loader_getter('val')
         loss = []
         #out_list = []
         #av_length = 5
+        accuracy, accuracy_post, accuracy_vp = [], [], []
+        names = []
         with torch.no_grad():
             for b,batch in tqdm(enumerate(val_loader)):
-                if len(batch['image']) != self.options["training"]["batch_size"]:
-                    break
-                if b < 44:
-                    continue
+                evaluator2.reset()
+                self.evaluator.reset()
+                evaluator_vp.reset()
+
+                name = batch['name'][0]
+
+                # if name not in ['687.png', '205.png', '867.png', '1008.png', '777.png']:
+                #     continue
+
                 image = batch['image'].to(self.device)
                 gt = batch['ground_truth'].to(self.device)
 
-                out = self.model(image)
-                loss.append(self.criterion(out, gt).item())
+                skip_model = True
 
-                pred = out.data.cpu().numpy()
-                array_saver = ArraySaver()
-                array_saver(pred, batch['name'][0] + '.npy', folder=os.path.join('segmentation_probs', self.validation_folder))
+                if skip_model:
+                    with open(os.path.join('data/results', 'segmentation_probs', self.validation_folder, name + '.npy'), 'rb') as f:
+                        pred = np.load(f)
+                else:
+                    out = self.model(image)
+                    loss.append(self.criterion(out, gt).item())
+
+                    pred = out.data.cpu().numpy()
+                    array_saver(pred, batch['name'][0] + '.npy', folder=os.path.join('segmentation_probs', self.validation_folder))
 
                 gt = gt.cpu().numpy()
                 pred0 = np.argmax(pred, axis=1)
@@ -92,46 +106,75 @@ class Trainer():
                 self.img_saver(pred0[0], batch['name'][0], folder=os.path.join('segmentation_raw', self.validation_folder))
 
                 start_time = time.time()
-                polygons,face_labels = post.EM(pred[0])
+                skip_post = False
+
+                if skip_post:
+                    with open(os.path.join('data/results', 'polygons', self.validation_folder, name), 'rb') as f:
+                        polygons = np.load(f)
+                        face_labels = np.load(f)               
+                else:
+                    polygons,face_labels = post.EM(pred[0])
+                    array_saver(polygons, batch['name'][0] + '.npy', folder=os.path.join('polygons', self.validation_folder), array1=face_labels)
                 pred_post = post.get_segmentation_output(polygons, face_labels)
                 pred_post = np.expand_dims(pred_post, axis=0)
                 evaluator2.add_batch(gt, pred_post)
-                evaluator2.add_time(time.time() - start_time)
+                #evaluator2.add_time(time.time() - start_time)
+
+                #or i,o in enumerate(out):
+                pred_post = decode_seg_map_sequence(pred_post)
+                self.img_saver(pred_post[0], batch['name'][0], folder=os.path.join('segmentation_post', self.validation_folder))
+
+                t2 = time.time()
+
+                print('post time', t2 - start_time)
+
+                skip_vp = False
+
+                if skip_vp:
+                    with open(os.path.join('data/results', 'polygons_vp', self.validation_folder, name), 'rb') as f:
+                        new_polygons = np.load(f)
+                        face_labels = np.load(f) 
+                else:
+                    new_polygons = post.opt_vp(polygons, face_labels, pred[0])
+                pred_post = post.get_segmentation_output(new_polygons, face_labels)
+                pred_post = np.expand_dims(pred_post, axis=0)
+                evaluator_vp.add_batch(gt, pred_post)
+                evaluator_vp.add_time(time.time() - start_time)
 
                 #or i,o in enumerate(out):
                 pred_post = decode_seg_map_sequence(pred_post)
 
                 #for i,p in enumerate(pred1):
                 #     #nb = b*options['training']['batch_size'] + i
-                self.img_saver(pred_post[0], batch['name'][0], folder=os.path.join('segmentation_post', self.validation_folder))
-                array_saver(polygons, batch['name'][0] + '.npy', folder=os.path.join('polygons', self.validation_folder), array1=face_labels)
+                self.img_saver(pred_post[0], batch['name'][0], folder=os.path.join('segmentation_vp', self.validation_folder))
+                array_saver(new_polygons, batch['name'][0] + '.npy', folder=os.path.join('polygons_vp', self.validation_folder), array1=face_labels)
 
-                # if b == 50:
-                #     break
+                print('vp time', t2 - time.time())
 
-                # out_list.append(out)
-                # #print(batch['name'])
-                # if len(out_list) > av_length:
-                #     out_list.pop(0)
-                #     #av_out = torch.mean(torch.stack(out_list),0)
-                #     av_out = (3*out_list[2] + 2*(out_list[1] + out_list[3]) + (out_list[0] + out_list[4]))/14
-                #     av_pred = av_out.data.cpu().numpy()
-                #     av_pred = np.argmax(av_pred, axis=1)
-                #     av_pred = decode_seg_map_sequence(av_pred)
-                #     self.img_saver(av_pred[0], str(b-av_length+1) + '.png', img2=pred[0], folder='results_MVI_3027.MP4')
-        #writer.add_scalar('validation return', returns_average, step)
-
-
-                accuracy = self.evaluator.Pixel_Accuracy()
-                accuracy2 = evaluator2.Pixel_Accuracy()
-                self.best_acc = max(accuracy, self.best_acc)
-                print_string = 'VALIDATION: Step {} Loss {:.2f} Accuracy {:.2f}%'.format(self.step,
-                                sum(loss)/len(loss), accuracy*100)
-                print(print_string)
-                avg_time = evaluator2.get_average_time()
-                print("other accuracy", accuracy2*100, "Time", avg_time)
+                accuracy.append(self.evaluator.Pixel_Accuracy())
+                accuracy_post.append(evaluator2.Pixel_Accuracy())
+                accuracy_vp.append(evaluator_vp.Pixel_Accuracy())
+                #self.best_acc = max(accuracy, self.best_acc)
+                # print_string = 'VALIDATION: Step {} Loss {:.2f} Accuracy {:.2f}%'.format(self.step,
+                #                 sum(loss)/len(loss), accuracy*100)
+                #print(print_string)
+                #avg_time = evaluator_vp.get_average_time()
+                print("Name {} First Accuracy {:.2f} Post Accuracy {:.2f} VP Accuracy {:.2f}".format(name ,accuracy[-1]*100, accuracy_post[-1]*100, accuracy_vp[-1]*100))
+                names.append(name)
+                if b % 10 == 0:
+                    print("Overall scores: First Accuracy {:.4f} Post Accuracy {:.4f} VP Accuracy {:.4f}".format(sum(accuracy)/len(accuracy)*100, 
+                                                                                    sum(accuracy_post)/len(accuracy_post)*100, sum(accuracy_vp)/len(accuracy_vp)*100))
         #save_string(print_string, self.logdir)
+
+        print("Overall scores: First Accuracy {:.4f} Post Accuracy {:.4f} VP Accuracy {:.4f}".format(sum(accuracy)/len(accuracy)*100, 
+                                                                                    sum(accuracy_post)/len(accuracy_post)*100, sum(accuracy_vp)/len(accuracy_vp)*100))
         self.evaluator.reset()
+
+        acc_performance = [vp - post for post,vp in zip(accuracy_post, accuracy_vp)]
+        names = [n for a,n in sorted(zip(acc_performance, names))]
+        acc_performance = sorted(acc_performance)
+        for name,p in zip(names, acc_performance):
+            print(name, p)
 
     def train(self):
         while True:

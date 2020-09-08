@@ -1,10 +1,25 @@
 import numpy as np
 
+def shuf():
+	hey = [1,2]
+	np.random.shuffle(hey)
+	print(hey)
 
-# yo = ['yo', 'ik', 'ben', 'Ruben']
+def yo():
 
-yo = ['yo']
+	yo = [2,3]
 
-hey = " ".join(yo)
+	hey(yo)
 
-print(hey)
+	print(yo)
+
+def hey(yo):
+	hey = yo.copy()
+	hey.append(1)
+
+
+#shuf()
+
+
+for value_var in np.arange(-5,5,1):
+	print(value_var)

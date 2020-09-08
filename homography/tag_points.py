@@ -22,6 +22,9 @@ class Tag():
 		self.adjacency = {'Front': 'Back', 'Back': 'Front', 'Left': 'Right', 
 						'Right': 'Left', 'Top': 'Bottom', 'Bottom': 'Top'}
 
+		self.tag_order = ['Front Left Bottom', 'Front Right Bottom', 'Front Right Top', 'Front Left Top',
+							'Back Left Top', 'Back Right Top', 'Back Right Bottom', 'Back Left Bottom']
+
 	def pretty_print(self,dict):
 		print(yaml.dump(dict, default_flow_style=False))
 
@@ -89,6 +92,25 @@ class Tag():
 				if np.array_equal(point, p):
 					connected_sides.append(sides[ipoly2])
 		return connected_sides
+
+	def swap_tags(self, points):
+		'''
+		Only works for swapping Front to Back
+		'''
+		replace = ['Front', 'Back', 'Left', 'Right']
+		points_copy = points.copy()
+		points = {}
+		for tag in points_copy:
+			sides = tag.split(' ')
+			new_sides = []
+			for s in sides:
+				if s in replace:
+					new_sides.append(self.adjacency[s])
+				else:
+					new_sides.append(s)
+			new_tag = " ".join(new_sides)
+			points[new_tag] = points_copy[tag]
+		return points
 
 	def reorder_corner_name(self, corner_name):
 
@@ -169,28 +191,82 @@ class Tag():
 		except:
 			return sides
 
+	def one_side(self, side, polygon):
+		polygon = sorted(polygon, key = lambda k: k[1])
+		bottom_points = polygon[-2:]
+		top_points = polygon[:-2]
+		bottom_points = sorted(bottom_points, key = lambda k: k[0])
+		top_points = sorted(top_points, key= lambda k: k[0])
+
+		img_points = {}
+		if side == 'Left':
+			img_points['Back Left Bottom'] = bottom_points[0]
+			img_points['Front Left Bottom'] = bottom_points[1]
+			img_points['Back Left Top'] = top_points[0]
+			img_points['Front Left Top'] = top_points[1]
+		elif side == 'Right':
+			img_points['Front Right Bottom'] = bottom_points[0]
+			img_points['Back Right Bottom'] = bottom_points[1]
+			img_points['Front Right Top'] = top_points[0]
+			img_points['Back Right Top'] = top_points[1]
+		elif side == 'Front':
+			img_points['Front Left Bottom'] = bottom_points[0]
+			img_points['Front Right Bottom'] = bottom_points[1]
+			img_points['Front Left Top'] = top_points[0]
+			img_points['Front Right Top'] = top_points[1]
+		elif side == 'Back':
+			img_points['Back Right Bottom'] = bottom_points[0]
+			img_points['Back Left Bottom'] = bottom_points[1]
+			img_points['Back Right Top'] = top_points[0]
+			img_points['Back Left Top'] = top_points[1]
+		elif side == 'Top':	#This is impossible to know
+			raise NotImplementedError
+		return img_points
+
+	def compute_ratios(self,points,sides):
+
+		def sort_by_order(elem):
+			return self.tag_order.index(elem)
+
+		scores = []
+		for side in sides:
+			side_tags = [tag for tag in points if side in tag.split(' ')]
+			side_tags = sorted(side_tags, key = sort_by_order)
+
+			point0 = np.asarray(points[side_tags[0]])
+			point1 = np.asarray(points[side_tags[1]])
+			point2 = np.asarray(points[side_tags[2]])
+			point3 = np.asarray(points[side_tags[3]])
+			ratio_0 = np.linalg.norm(point0 - point1)/np.linalg.norm(point2 - point3)
+			ratio_1 = np.linalg.norm(point0 - point3)/np.linalg.norm(point1 - point2)
+			ratio_score = (abs(1 - ratio_0) + abs(1 - ratio_1))/2
+			scores.append(ratio_score)
+		return scores
+
 	def __call__(self, polygons, sides):
 		sides = self.ints_to_labels(sides)
 		sides = self.handle_front_or_back(sides, polygons)
-		#print(sides)
 
-		img_points = {}
+		if len(sides) == 1:
+			img_points = self.one_side(sides[0], polygons[0])
+		else:
+			img_points = {}
 
-		for ipoly,polygon in enumerate(polygons):
-			for point in polygon:
-				connected_sides = self.find_connected_sides(point, ipoly, polygons, sides)
-				if len(connected_sides) == 0:
-					corner_name = self.unconnected_corner(sides[ipoly], sides)
-				else:
-					corner_name = self.connected_corner(sides[ipoly], connected_sides, sides)
-				if corner_name not in img_points:
-					img_points[corner_name] = []
-				new_point = (int(point[0]),int(point[1]))
-				if len(img_points[corner_name]) == 0 or new_point != img_points[corner_name][0]:
-					img_points[corner_name].append(new_point)
-			
-		# self.pretty_print(img_points)
-		self.handle_doubles(img_points, sides)
+			for ipoly,polygon in enumerate(polygons):
+				for point in polygon:
+					connected_sides = self.find_connected_sides(point, ipoly, polygons, sides)
+					if len(connected_sides) == 0:
+						corner_name = self.unconnected_corner(sides[ipoly], sides)
+					else:
+						corner_name = self.connected_corner(sides[ipoly], connected_sides, sides)
+					if corner_name not in img_points:
+						img_points[corner_name] = []
+					new_point = (int(point[0]),int(point[1]))
+					if len(img_points[corner_name]) == 0 or new_point != img_points[corner_name][0]:
+						img_points[corner_name].append(new_point)
+				
+			# self.pretty_print(img_points)
+			self.handle_doubles(img_points, sides)
 
 		# self.pretty_print(self.img_points)
 		#self.show_points(img_points, img_name)
