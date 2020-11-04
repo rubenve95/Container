@@ -6,6 +6,7 @@ class Metrics(object):
         self.num_class = num_class
         self.confusion_matrix = np.zeros((self.num_class,)*2)
         self.time = []
+        self.custom_metric = []
 
     def Pixel_Accuracy(self):
         Acc = np.diag(self.confusion_matrix).sum() / self.confusion_matrix.sum()
@@ -45,6 +46,9 @@ class Metrics(object):
 
     def add_time(self, time):
         self.time.append(time)
+
+    def add_custom_metric(self, metric_score):
+        self.custom_metric.append(metric_score)
 
     def get_average_time(self):
         return sum(self.time)/len(self.time)

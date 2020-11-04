@@ -1,25 +1,17 @@
 import numpy as np
-
-def shuf():
-	hey = [1,2]
-	np.random.shuffle(hey)
-	print(hey)
-
-def yo():
-
-	yo = [2,3]
-
-	hey(yo)
-
-	print(yo)
-
-def hey(yo):
-	hey = yo.copy()
-	hey.append(1)
+import itertools
+import time
+import os
 
 
-#shuf()
+# temp = [[]]*3
 
+temp = [[],[],[]]
 
-for value_var in np.arange(-5,5,1):
-	print(value_var)
+for i in range(3):
+	add = [i, i**2]
+	for a in add:
+		temp[i].append(add)
+	#temp[i].extend([i,i**2])
+
+print(temp)

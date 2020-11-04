@@ -41,8 +41,8 @@ class ModelSaver():
 		return model, start_epoch, best_acc, scheduler, optimizer
 
 class ImgSaver():
-	def __init__(self):
-		self.save_folder = os.path.join('data', 'results')
+	def __init__(self, results_folder='results'):
+		self.save_folder = os.path.join('data', results_folder)
 
 	def __call__(self, img, name, img2=None, folder=None):
 		img = np.array(img).astype(np.uint8)
@@ -66,8 +66,8 @@ class ImgSaver():
 
 
 class ArraySaver():
-	def __init__(self):
-		self.save_folder = os.path.join('data', 'results')
+	def __init__(self, results_folder='results'):
+		self.save_folder = os.path.join('data', results_folder)
 
 	def __call__(self, array, name, folder=None, array1=None):
 		if folder is not None:
